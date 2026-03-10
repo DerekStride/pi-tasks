@@ -13,6 +13,8 @@ export type ListIntent =
   | { type: "toggleStatus" }
   | { type: "setPriority"; priority: string }
   | { type: "scrollDescription"; delta: number }
+  | { type: "cycleSource"; delta: number }
+  | { type: "openSource" }
   | { type: "toggleType" }
   | { type: "create" }
   | { type: "insert" }
@@ -26,6 +28,8 @@ export interface ListControllerState {
   closeKey: string
   priorities: string[]
   priorityHotkeys?: Record<string, string>
+  hasSelectedTaskSources?: boolean
+  canOpenSelectedTaskSource?: boolean
 }
 
 type ShortcutContext = "default" | "search"
@@ -78,6 +82,11 @@ const MOVE_KEYS: Record<string, number> = {
 const SCROLL_KEYS: Record<string, number> = {
   j: 1,
   k: -1,
+}
+
+const SOURCE_KEYS: Record<string, number> = {
+  "[": -1,
+  "]": 1,
 }
 
 const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
@@ -156,6 +165,20 @@ const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   },
   {
     context: "default",
+    help: "[/] source",
+    showInHelp: (state) => !!state.hasSelectedTaskSources,
+    match: (data, state) => !!state.hasSelectedTaskSources && data in SOURCE_KEYS,
+    intent: (data) => ({ type: "cycleSource", delta: SOURCE_KEYS[data] ?? 1 }),
+  },
+  {
+    context: "default",
+    help: "o open",
+    showInHelp: (state) => !!state.canOpenSelectedTaskSource,
+    match: (data, state) => !!state.canOpenSelectedTaskSource && (data === "o" || data === "O"),
+    intent: () => ({ type: "openSource" }),
+  },
+  {
+    context: "default",
     help: "t type",
     match: (data) => data === "t" || data === "T",
     intent: () => ({ type: "toggleType" }),
@@ -203,6 +226,9 @@ export function buildListPrimaryHelpText(state: ListControllerState): string {
   return parts.join(" • ")
 }
 
-export function buildListSecondaryHelpText(): string {
-  return "space status • j/k scroll"
+export function buildListSecondaryHelpText(hasSelectedTaskSources = false, canOpenSelectedTaskSource = false): string {
+  const parts = ["space status", "j/k scroll"]
+  if (hasSelectedTaskSources) parts.push("[/] source")
+  if (canOpenSelectedTaskSource) parts.push("o open")
+  return parts.join(" • ")
 }

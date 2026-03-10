@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import type { Task, TaskStatus } from "../../models/task.ts"
+import type { Task, TaskSource, TaskSourceType, TaskStatus } from "../../models/task.ts"
 import type { CreateTaskInput, TaskAdapter, TaskAdapterInitializer, TaskStatusMap, TaskUpdate } from "../api.ts"
 
 const MAX_LIST_RESULTS = 100
@@ -24,11 +24,18 @@ const PRIORITY_HOTKEYS: Record<string, string> = {
   "4": "p4",
 }
 
+interface SqSource {
+  type?: string
+  path?: string
+  content?: string
+}
+
 interface SqItem {
   id: string
   title?: string
   description?: string
   status: string
+  sources?: SqSource[]
   metadata?: Record<string, unknown>
   blocked_by?: string[]
   created_at?: string
@@ -98,6 +105,32 @@ function fromBackendStatus(status: string, blockedBy: string[] | undefined, pend
   return "open"
 }
 
+function normalizeSourceType(value: string | undefined): TaskSourceType {
+  if (value === "file" || value === "text" || value === "diff" || value === "directory") {
+    return value
+  }
+  return "unknown"
+}
+
+function normalizeSourceContent(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+  return value.length > 0 ? value : undefined
+}
+
+function toTaskSources(sources: SqSource[] | undefined): TaskSource[] | undefined {
+  if (!sources || sources.length === 0) return undefined
+
+  const normalizedSources = sources
+    .map(source => ({
+      type: normalizeSourceType(source.type),
+      path: normalizeText(source.path),
+      content: normalizeSourceContent(source.content),
+    }))
+    .filter((source): source is TaskSource => source.type !== "unknown")
+
+  return normalizedSources.length > 0 ? normalizedSources : undefined
+}
+
 function toTask(item: SqItem, pendingIds?: Set<string>): Task {
   const metadata = extractTaskMetadata(item.metadata)
 
@@ -113,6 +146,7 @@ function toTask(item: SqItem, pendingIds?: Set<string>): Task {
     updatedAt: item.updated_at,
     dueAt: metadata.dueAt,
     dependencyCount: item.blocked_by?.length,
+    sources: toTaskSources(item.sources),
   }
 }
 

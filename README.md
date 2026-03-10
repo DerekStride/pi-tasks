@@ -23,7 +23,11 @@ Task management extension for the [pi coding agent](https://github.com/badlogic/
 - `e` to edit a task
 - `Enter` to work off a task
 - `Tab` to insert task details in prompt and close Tasks UI
+- `[` / `]` to cycle task sources when available
+- `o` to open the selected source in a tmux popup
 - `c` to create a new task
+
+When a backend provides task sources (for example `sq` file/text/diff sources), the preview pane shows the selected source, `Enter` / `Tab` include those sources in the generated context, and `o` opens the currently selected source in a tmux popup.
 
 ### Edit view
 
@@ -45,9 +49,19 @@ Currently supported values:
 
 The `sq` backend integrates with [sift-queue](https://crates.io/crates/sift-queue) and reads/writes queue items through the `sq` CLI.
 
+When queue items include `sq` sources, Tasks can preview them in the list view, include them automatically in Work / Tab-insert actions, and open the selected source in a tmux popup.
+
 You can override the default queue file path with:
 
 - `PI_TASKS_SQ_QUEUE_PATH` — path to a specific queue JSONL file (passed to `sq --queue`)
+
+Optional source viewer env vars for tmux popups:
+
+- `PI_TASKS_SOURCE_VIEWER` — default shell command template used to open file-like sources
+- `PI_TASKS_SOURCE_VIEWER_<EXT>` — extension-specific override, for example `PI_TASKS_SOURCE_VIEWER_MD='glow -p {path}'`
+- `PI_TASKS_SOURCE_VIEWER_TEXT` / `PI_TASKS_SOURCE_VIEWER_DIFF` / `PI_TASKS_SOURCE_VIEWER_DIRECTORY` — source-type overrides
+
+Templates receive shell-quoted placeholders: `{path}`, `{title}`, `{type}`, `{ext}`.
 
 ### TODO.md backend
 

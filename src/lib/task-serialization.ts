@@ -25,7 +25,21 @@ export function serializeTask(task: Task): string {
   return `task(${parts.join(", ")})`
 }
 
-export function buildTaskWorkPrompt(task: Task): string {
+export function buildTaskInsertText(task: Task, sourceContext?: string): string {
+  if (!sourceContext) return `${serializeTask(task)} `
+
+  const lines = [serializeTask(task)]
+  const description = task.description?.trim()
+
+  if (description) {
+    lines.push("", "Context:", description)
+  }
+
+  lines.push("", "Sources:", sourceContext, "")
+  return lines.join("\n")
+}
+
+export function buildTaskWorkPrompt(task: Task, sourceContext?: string): string {
   const leadLine = task.id
     ? `Work on task ${task.id}: ${task.title}`
     : `Work on task: ${task.title}`
@@ -39,6 +53,10 @@ export function buildTaskWorkPrompt(task: Task): string {
 
   if (task.description && task.description.trim()) {
     lines.push("", "Context:", task.description.trim())
+  }
+
+  if (sourceContext) {
+    lines.push("", "Sources:", sourceContext)
   }
 
   return lines.join("\n")

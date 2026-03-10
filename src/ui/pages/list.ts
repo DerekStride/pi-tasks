@@ -7,12 +7,14 @@ import { buildListPrimaryHelpText, buildListSecondaryHelpText, resolveListIntent
 import { KEYBOARD_HELP_PADDING_X, formatKeyboardHelp } from "../components/keyboard-help.ts"
 import { MinHeightContainer } from "../components/min-height.ts"
 import { SelectListWithColumns } from "../components/select-list-with-columns.ts"
+import { taskHasSources, type TaskSourcePreview } from "../../lib/task-sources.ts"
 
 const LIST_PAGE_CONTENT_MIN_HEIGHT = 20
 const TASK_LIST_ROW_LAYOUT = {
   valueMaxWidth: 60,
   valueColumnWidth: 62,
 }
+const PREVIEW_BODY_LINES = 6
 
 export interface ListPageConfig {
   title: string
@@ -27,10 +29,12 @@ export interface ListPageConfig {
   cycleStatus: (status: TaskStatus) => TaskStatus
   cycleTaskType: (current: string | undefined) => string
   onUpdateTask: (ref: string, update: TaskUpdate) => Promise<void>
-  onWork: (task: Task) => void
-  onInsert: (task: Task) => void
+  onWork: (task: Task) => void | Promise<void>
+  onInsert: (task: Task) => void | Promise<void>
   onEdit: (ref: string, task: Task | undefined) => Promise<{ updatedTask: Task | null; closeList: boolean }>
   onCreate: () => Promise<Task | null>
+  onOpenSource?: (task: Task, index: number) => void | Promise<void>
+  loadSourcePreview?: (task: Task, index: number) => Promise<TaskSourcePreview>
 }
 
 function truncateDescription(desc: string | undefined, maxLines: number): string[] {
@@ -66,12 +70,66 @@ function buildHeaderText(
   return `${theme.fg("muted", theme.bold(title))}${subtitlePart}`
 }
 
+function wrapText(text: string, width: number, maxLines: number): string[] {
+  const lines: string[] = []
+  const safeWidth = Math.max(1, width)
+
+  if (text.length === 0) return [""]
+
+  const words = text.split(" ")
+  let currentLine = ""
+
+  const flushLine = () => {
+    if (lines.length < maxLines) lines.push(currentLine)
+    currentLine = ""
+  }
+
+  for (const word of words) {
+    const candidate = currentLine ? `${currentLine} ${word}` : word
+
+    if (stripAnsi(candidate).length <= safeWidth) {
+      currentLine = candidate
+      continue
+    }
+
+    if (currentLine) {
+      flushLine()
+      if (lines.length >= maxLines) break
+    }
+
+    let remaining = word
+    while (stripAnsi(remaining).length > safeWidth) {
+      const chunk = remaining.slice(0, safeWidth)
+      if (lines.length < maxLines) lines.push(chunk)
+      if (lines.length >= maxLines) break
+      remaining = remaining.slice(safeWidth)
+    }
+    if (lines.length >= maxLines) break
+    currentLine = remaining
+  }
+
+  if (currentLine && lines.length < maxLines) lines.push(currentLine)
+  return lines.slice(0, maxLines)
+}
+
+function buildPreviewText(lines: string[], width: number, maxLines: number): string {
+  const wrappedLines: string[] = []
+  for (const line of lines) {
+    const wrapped = wrapText(line, width, maxLines - wrappedLines.length)
+    wrappedLines.push(...wrapped)
+    if (wrappedLines.length >= maxLines) break
+  }
+  while (wrappedLines.length < maxLines) wrappedLines.push("")
+  return wrappedLines.join("\n")
+}
+
 export async function showTaskList(ctx: ExtensionCommandContext, config: ListPageConfig): Promise<void> {
   const { title, subtitle, tasks, allowPriority = true, allowSearch = true } = config
 
   const displayTasks = [...tasks]
   let filterTerm = config.filterTerm || ""
   let rememberedSelectedRef: string | undefined
+  const selectedSourceIndexByRef = new Map<string, number>()
 
   while (true) {
     const visible = filterTerm
@@ -84,7 +142,7 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
       continue
     }
 
-    const getMaxLabelWidth = () => Math.max(...displayTasks.map(i =>
+    const getMaxLabelWidth = () => Math.max(0, ...displayTasks.map(i =>
       stripAnsi(buildListRowModel(i).label).length
     ))
 
@@ -93,7 +151,9 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
       const container = new Container()
       let searching = false
       let searchBuffer = ""
-      let descScroll = 0
+      let previewScroll = 0
+      let previewVersion = 0
+      let currentPreviewLines: string[] = []
 
       const headerContainer = new Container()
       const listAreaContainer = new Container()
@@ -155,11 +215,94 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
         if (rememberedIndex >= 0) selectList.setSelectedIndex(rememberedIndex)
       }
 
+      const previewTitleText = new Text("", 0, 0)
+      const previewSourceText = new Text("", 0, 0)
+      const previewBodyText = new Text(buildPreviewText([], 80, PREVIEW_BODY_LINES), 0, 0)
+      const itemPreviewContainer = new Container()
+      itemPreviewContainer.addChild(previewTitleText)
+      itemPreviewContainer.addChild(previewSourceText)
+      itemPreviewContainer.addChild(previewBodyText)
+
+      let lastWidth = 80
+
+      const getSelectedTask = (): Task | undefined => {
+        const selected = selectList.getSelectedItem()
+        if (!selected) return undefined
+        rememberedSelectedRef = selected.value
+        return displayTasks.find(i => i.ref === selected.value)
+      }
+
+      const getCurrentSourceIndex = (task: Task): number => {
+        const sourceCount = task.sources?.length ?? 0
+        if (sourceCount === 0) return 0
+
+        const current = selectedSourceIndexByRef.get(task.ref) ?? 0
+        const normalized = ((current % sourceCount) + sourceCount) % sourceCount
+        if (normalized !== current) selectedSourceIndexByRef.set(task.ref, normalized)
+        return normalized
+      }
+
+      const renderVisiblePreview = () => {
+        const allWrapped: string[] = []
+        for (const line of currentPreviewLines) {
+          const wrapped = wrapText(line, lastWidth, 100)
+          allWrapped.push(...wrapped)
+        }
+
+        const maxScroll = Math.max(0, allWrapped.length - PREVIEW_BODY_LINES)
+        if (previewScroll > maxScroll) previewScroll = maxScroll
+        if (previewScroll < 0) previewScroll = 0
+
+        const visible = allWrapped.slice(previewScroll, previewScroll + PREVIEW_BODY_LINES)
+        while (visible.length < PREVIEW_BODY_LINES) visible.push("")
+        previewBodyText.setText(visible.join("\n"))
+      }
+
+      const setPreviewBody = (lines: string[]) => {
+        currentPreviewLines = lines
+        renderVisiblePreview()
+      }
+
+      const updatePreview = async () => {
+        const task = getSelectedTask()
+        const requestVersion = ++previewVersion
+
+        if (!task) {
+          previewTitleText.setText("")
+          previewSourceText.setText("")
+          setPreviewBody([])
+          return
+        }
+
+        previewScroll = 0
+        previewTitleText.setText(theme.fg("accent", theme.bold(task.title)))
+
+        if (!taskHasSources(task) || !config.loadSourcePreview) {
+          previewSourceText.setText(theme.fg("muted", "Description"))
+          const descLines = truncateDescription(task.description, 100)
+          setPreviewBody(descLines)
+          return
+        }
+
+        const sourceCount = task.sources?.length ?? 0
+        const sourceIndex = getCurrentSourceIndex(task)
+        previewSourceText.setText(theme.fg("muted", `Source ${sourceIndex + 1}/${sourceCount} • loading…`))
+        setPreviewBody(["Loading source preview…"])
+        container.invalidate()
+        tui.requestRender()
+
+        const preview = await config.loadSourcePreview(task, sourceIndex)
+        if (requestVersion !== previewVersion) return
+
+        previewSourceText.setText(theme.fg("muted", `Source ${sourceIndex + 1}/${sourceCount} • ${preview.title}`))
+        const previewLines = preview.content.split(/\r?\n/)
+        setPreviewBody(previewLines)
+      }
+
       selectList.onSelectionChange = () => {
         const selected = selectList.getSelectedItem()
         if (selected) rememberedSelectedRef = selected.value
-        updateDescPreview()
-        tui.requestRender()
+        void updatePreview().finally(() => tui.requestRender())
       }
       selectList.onSelect = () => {
         const sel = selectList.getSelectedItem()
@@ -187,94 +330,11 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
         listAreaContainer.addChild(itemPreviewContainer)
       }
 
-      const wrapText = (text: string, width: number, maxLines: number): string[] => {
-        const lines: string[] = []
-        const safeWidth = Math.max(1, width)
-
-        if (text.length === 0) return [""]
-
-        const words = text.split(" ")
-        let currentLine = ""
-
-        const flushLine = () => {
-          if (lines.length < maxLines) lines.push(currentLine)
-          currentLine = ""
-        }
-
-        for (const word of words) {
-          const candidate = currentLine ? `${currentLine} ${word}` : word
-
-          if (stripAnsi(candidate).length <= safeWidth) {
-            currentLine = candidate
-            continue
-          }
-
-          if (currentLine) {
-            flushLine()
-            if (lines.length >= maxLines) break
-          }
-
-          let remaining = word
-          while (stripAnsi(remaining).length > safeWidth) {
-            const chunk = remaining.slice(0, safeWidth)
-            if (lines.length < maxLines) lines.push(chunk)
-            if (lines.length >= maxLines) break
-            remaining = remaining.slice(safeWidth)
-          }
-          if (lines.length >= maxLines) break
-          currentLine = remaining
-        }
-
-        if (currentLine && lines.length < maxLines) lines.push(currentLine)
-        return lines.slice(0, maxLines)
-      }
-
-      const buildDescText = (descLines: string[], width: number): string => {
-        const wrappedLines: string[] = []
-        for (const line of descLines) {
-          const wrapped = wrapText(line, width, 7 - wrappedLines.length)
-          wrappedLines.push(...wrapped)
-          if (wrappedLines.length >= 7) break
-        }
-        while (wrappedLines.length < 7) wrappedLines.push("")
-        return wrappedLines.join("\n")
-      }
-
-      const previewTitleText = new Text("", 0, 0)
-      const descTextComponent = new Text(buildDescText([], 80), 0, 0)
-      const itemPreviewContainer = new Container()
-      itemPreviewContainer.addChild(previewTitleText)
-      itemPreviewContainer.addChild(descTextComponent)
-
-      let lastWidth = 80
-
-      const updateDescPreview = () => {
-        const selected = selectList.getSelectedItem()
-        if (!selected) {
-          previewTitleText.setText("")
-          descTextComponent.setText(buildDescText([], lastWidth))
-          return
-        }
-
-        descScroll = 0
-        const task = displayTasks.find(i => i.ref === selected.value)
-        if (!task) {
-          previewTitleText.setText("")
-          descTextComponent.setText(buildDescText([], lastWidth))
-          return
-        }
-
-        previewTitleText.setText(theme.fg("accent", theme.bold(task.title)))
-        const descLines = truncateDescription(task.description, 100)
-        descTextComponent.setText(buildDescText(descLines, lastWidth))
-      }
-      if (items[0]) updateDescPreview()
-
       headerContainer.addChild(new DynamicBorder((s: string) => theme.fg("dim", s)))
       headerContainer.addChild(titleText)
 
       const helpText = new Text("", KEYBOARD_HELP_PADDING_X, 0)
-      const shortcutsText = new Text(formatKeyboardHelp(theme, buildListSecondaryHelpText()), KEYBOARD_HELP_PADDING_X, 0)
+      const shortcutsText = new Text("", KEYBOARD_HELP_PADDING_X, 0)
 
       footerContainer.addChild(new DynamicBorder((s: string) => theme.fg("dim", s)))
       footerContainer.addChild(helpText)
@@ -284,6 +344,10 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
       renderListArea()
 
       const refreshDisplay = () => {
+        const selectedTask = getSelectedTask()
+        const hasSelectedTaskSources = !!selectedTask && taskHasSources(selectedTask) && !!config.loadSourcePreview
+        const canOpenSelectedTaskSource = !!selectedTask && taskHasSources(selectedTask) && !!config.onOpenSource
+
         titleText.setText(buildHeaderText(theme, title, subtitle, searching, searchBuffer, filterTerm))
         helpText.setText(formatKeyboardHelp(theme, buildListPrimaryHelpText({
           searching,
@@ -293,9 +357,13 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
           closeKey: config.closeKey,
           priorities: config.priorities,
           priorityHotkeys: config.priorityHotkeys,
+          hasSelectedTaskSources,
+          canOpenSelectedTaskSource,
         })))
+        shortcutsText.setText(formatKeyboardHelp(theme, buildListSecondaryHelpText(hasSelectedTaskSources, canOpenSelectedTaskSource)))
       }
       refreshDisplay()
+      if (items[0]) void updatePreview()
 
       const moveSelection = (delta: number) => {
         if (items.length === 0) return
@@ -304,16 +372,11 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
         const normalizedIndex = currentIndex >= 0 ? currentIndex : 0
         const nextIndex = (normalizedIndex + delta + items.length) % items.length
         selectList.setSelectedIndex(nextIndex)
-        updateDescPreview()
-        container.invalidate()
-        tui.requestRender()
-      }
-
-      const getSelectedTask = (): Task | undefined => {
-        const selected = selectList.getSelectedItem()
-        if (!selected) return undefined
-        rememberedSelectedRef = selected.value
-        return displayTasks.find(i => i.ref === selected.value)
+        refreshDisplay()
+        void updatePreview().finally(() => {
+          container.invalidate()
+          tui.requestRender()
+        })
       }
 
       const withSelectedTask = (run: (task: Task) => void): void => {
@@ -331,8 +394,8 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
         selectList.onSelectionChange = () => {
           const selected = selectList.getSelectedItem()
           if (selected) rememberedSelectedRef = selected.value
-          updateDescPreview()
-          tui.requestRender()
+          refreshDisplay()
+          void updatePreview().finally(() => tui.requestRender())
         }
         selectList.onSelect = () => {
           const sel = selectList.getSelectedItem()
@@ -359,18 +422,42 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
         }
 
         refreshDisplay()
-        updateDescPreview()
+        void updatePreview().finally(() => {
+          container.invalidate()
+          tui.requestRender()
+        })
+      }
+
+      const scrollPreview = (_task: Task, delta: number) => {
+        const allWrapped: string[] = []
+        for (const line of currentPreviewLines) {
+          const wrapped = wrapText(line, lastWidth, 100)
+          allWrapped.push(...wrapped)
+        }
+
+        const maxScroll = Math.max(0, allWrapped.length - PREVIEW_BODY_LINES)
+        if (delta > 0 && previewScroll < maxScroll) {
+          previewScroll++
+        } else if (delta < 0 && previewScroll > 0) {
+          previewScroll--
+        }
+
+        renderVisiblePreview()
         container.invalidate()
         tui.requestRender()
       }
 
       return {
         render: (w: number) => {
-          lastWidth = w
+          if (lastWidth !== w) {
+            lastWidth = w
+            renderVisiblePreview()
+          }
           return container.render(w).map((l: string) => truncateToWidth(l, w))
         },
         invalidate: () => container.invalidate(),
         handleInput: (data: string) => {
+          const selectedTask = getSelectedTask()
           const intent = resolveListIntent(data, {
             searching,
             filtered: !!filterTerm,
@@ -379,6 +466,8 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
             closeKey: config.closeKey,
             priorities: config.priorities,
             priorityHotkeys: config.priorityHotkeys,
+            hasSelectedTaskSources: !!selectedTask && taskHasSources(selectedTask) && !!config.loadSourcePreview,
+            canOpenSelectedTaskSource: !!selectedTask && taskHasSources(selectedTask) && !!config.onOpenSource,
           })
 
           switch (intent.type) {
@@ -430,7 +519,7 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
             case "work":
               withSelectedTask((task) => {
                 done("cancel")
-                config.onWork(task)
+                void config.onWork(task)
               })
               return
 
@@ -460,24 +549,31 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
               return
 
             case "scrollDescription":
+              withSelectedTask((task) => scrollPreview(task, intent.delta))
+              return
+
+            case "cycleSource":
               withSelectedTask((task) => {
-                const descLines = truncateDescription(task.description, 100)
-                const allWrapped: string[] = []
-                for (const line of descLines) {
-                  const wrapped = wrapText(line, lastWidth, 100)
-                  allWrapped.push(...wrapped)
-                }
-                const maxScroll = Math.max(0, allWrapped.length - 7)
-                if (intent.delta > 0 && descScroll < maxScroll) {
-                  descScroll++
-                } else if (intent.delta < 0 && descScroll > 0) {
-                  descScroll--
-                }
-                const visible = allWrapped.slice(descScroll, descScroll + 7)
-                while (visible.length < 7) visible.push("")
-                descTextComponent.setText(visible.join("\n"))
-                container.invalidate()
-                tui.requestRender()
+                const sourceCount = task.sources?.length ?? 0
+                if (sourceCount === 0) return
+                const nextIndex = (getCurrentSourceIndex(task) + intent.delta + sourceCount) % sourceCount
+                selectedSourceIndexByRef.set(task.ref, nextIndex)
+                previewScroll = 0
+                refreshDisplay()
+                void updatePreview().finally(() => {
+                  container.invalidate()
+                  tui.requestRender()
+                })
+              })
+              return
+
+            case "openSource":
+              withSelectedTask((task) => {
+                if (!config.onOpenSource) return
+                const sourceIndex = getCurrentSourceIndex(task)
+                void Promise.resolve(config.onOpenSource(task, sourceIndex)).catch((error) => {
+                  ctx.ui.notify(error instanceof Error ? error.message : String(error), "error")
+                })
               })
               return
 
@@ -497,7 +593,7 @@ export async function showTaskList(ctx: ExtensionCommandContext, config: ListPag
             case "insert":
               withSelectedTask((task) => {
                 done("cancel")
-                config.onInsert(task)
+                void config.onInsert(task)
               })
               return
 

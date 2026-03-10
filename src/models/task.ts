@@ -1,4 +1,11 @@
 export type TaskStatus = "open" | "inProgress" | "blocked" | "deferred" | "closed"
+export type TaskSourceType = "file" | "text" | "diff" | "directory" | "unknown"
+
+export interface TaskSource {
+  type: TaskSourceType
+  path?: string
+  content?: string
+}
 
 export interface Task {
   ref: string
@@ -15,6 +22,7 @@ export interface Task {
   dependencyCount?: number
   dependentCount?: number
   commentCount?: number
+  sources?: TaskSource[]
 }
 
 interface TaskListElements {

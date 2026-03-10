@@ -1,10 +1,11 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent"
 import initializeAdapter from "./backend/resolver.ts"
 import type { Task, TaskStatus } from "./models/task.ts"
-import { buildTaskWorkPrompt, serializeTask } from "./lib/task-serialization.ts"
+import { buildTaskInsertText, buildTaskWorkPrompt } from "./lib/task-serialization.ts"
 import { showTaskList } from "./ui/pages/list.ts"
 import { showTaskForm } from "./ui/pages/show.ts"
 import type { TaskUpdate } from "./backend/api.ts"
+import { createTaskSourceResolver, taskHasSources } from "./lib/task-sources.ts"
 
 const CTRL_X = "\x18"
 
@@ -182,6 +183,22 @@ export default function registerExtension(pi: ExtensionAPI) {
     backend.priorities,
     backend.priorityHotkeys,
   )
+  const taskSourceResolver = createTaskSourceResolver(pi, process.cwd())
+
+  async function buildTaskSourceContext(task: Task): Promise<string | undefined> {
+    if (!taskHasSources(task)) return undefined
+    return taskSourceResolver.buildContext(task)
+  }
+
+  async function insertTaskIntoEditor(ctx: ExtensionCommandContext, task: Task): Promise<void> {
+    const sourceContext = await buildTaskSourceContext(task)
+    ctx.ui.pasteToEditor(buildTaskInsertText(task, sourceContext))
+  }
+
+  async function sendTaskToAgent(task: Task): Promise<void> {
+    const sourceContext = await buildTaskSourceContext(task)
+    pi.sendUserMessage(buildTaskWorkPrompt(task, sourceContext))
+  }
 
   async function listTasks(): Promise<Task[]> {
     return backend.list()
@@ -329,10 +346,12 @@ export default function registerExtension(pi: ExtensionAPI) {
         cycleStatus: nextStatus,
         cycleTaskType: nextTaskType,
         onUpdateTask: updateTask,
-        onWork: (task) => pi.sendUserMessage(buildTaskWorkPrompt(task)),
-        onInsert: (task) => ctx.ui.pasteToEditor(`${serializeTask(task)} `),
+        onWork: (task) => sendTaskToAgent(task),
+        onInsert: (task) => insertTaskIntoEditor(ctx, task),
         onEdit: (ref, task) => editTask(ctx, ref, task),
         onCreate: () => createTask(ctx),
+        onOpenSource: (task, index) => taskSourceResolver.openInTmuxPopup(task, index),
+        loadSourcePreview: (task, index) => taskSourceResolver.getPreview(task, index),
       })
     } catch (e) {
       ctx.ui.setStatus("tasks", undefined)
