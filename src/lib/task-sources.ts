@@ -374,6 +374,15 @@ export function createTaskSourceResolver(pi: ExtensionAPI, cwd: string) {
       const blocks: string[] = []
 
       for (const [index, source] of (task.sources ?? []).entries()) {
+        if ((source.type === "file" || source.type === "directory") && source.path) {
+          blocks.push([
+            `--- ${buildSourceLabel(source, index)} ---`,
+            `@${source.path}`,
+            `--- end ${basename(source.path)} ---`,
+          ].join("\n"))
+          continue
+        }
+
         const loaded = await getLoadedSource(task, index)
         const normalizedContent = normalizeWhitespace(loaded.content)
 
