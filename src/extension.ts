@@ -171,9 +171,27 @@ function applyDraftToTask(
   return nextTask
 }
 
+function buildBackendPromptAddition(backendId: string): string | undefined {
+  if (backendId !== "sq") return undefined
+
+  return [
+    "The pi-tasks extension is using the `sq` backend for this project.",
+    "Use `sq prime` to learn how to use the tool.",
+    "Scope extension specific metadata under",
+    "`--metadata '{\"pi_tasks\":{\"taskType\":\"TYPE\",\"dueAT\":\"TIMESTAMP\"}}'`.",
+  ].join(" ")
+}
+
 export default function registerExtension(pi: ExtensionAPI) {
   const backend = initializeAdapter(pi)
   validateBackendConfiguration(backend)
+
+  const backendPromptAddition = buildBackendPromptAddition(backend.id)
+  if (backendPromptAddition) {
+    pi.on("before_agent_start", async (event) => ({
+      systemPrompt: `${event.systemPrompt}\n\n${backendPromptAddition}`,
+    }))
+  }
 
   const nextStatus = (status: TaskStatus): TaskStatus => cycleStatus(status, backend.statusMap)
   const nextTaskType = (current: string | undefined): string => cycleTaskType(current, backend.taskTypes)
